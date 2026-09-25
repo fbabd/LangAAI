@@ -1,15 +1,18 @@
 """Command-line interface: ``langaai <task> --config <file.json>``.
 
-Each task reads one JSON settings file describing the antibody-antigen pairs
+Two tasks read one JSON settings file describing the antibody-antigen pairs
 to run and where to put the results, so a run is reproducible from a file
 you can keep beside its output rather than from shell history.
 
-    langaai predict   --config run.json
-    langaai design    --config run.json
-    langaai embed     --config run.json
-    langaai attention --config run.json
+    langaai predict  --config run.json
+    langaai design   --config run.json
     langaai schema                       # print an annotated example config
     langaai download                     # fetch the weights ahead of time
+
+Embeddings and attention are deliberately not exposed here: both return
+arrays rather than a table of residues, and what you do with them is a
+Python question. Use :func:`langaai.LangAAI.cls_embedding` and
+:func:`langaai.LangAAI.attention_block` directly -- see ``examples/``.
 
 ``langaai schema`` is the reference for the settings file; docs/cli.md walks
 through each task.
@@ -18,7 +21,8 @@ Contents:
     main: Entry point; dispatches on the subcommand.
     load_config: Read, parse and validate a settings file.
     Config/PairSpec: The validated settings.
-    cmd_predict/cmd_design/cmd_embed/cmd_attention/cmd_schema: One per task.
+    cmd_predict/cmd_design: One per task.
+    cmd_download: Fetch the weights without running anything.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -34,48 +38,23 @@ __all__ = ["main", "load_config", "Config", "PairSpec"]
 
 _VALID_RESIDUES = set("ACDEFGHIKLMNPQRSTVWYX")
 
-EMBEDDING_KINDS = (
-    "cls",
-    "antibody_blind",
-    "antibody_conditioned",
-    "antigen_blind",
-    "antigen_conditioned",
-)
-
 EXAMPLE_CONFIG = """\
 {
   // Shared settings. Every key here is optional and has the default shown.
   "device": "auto",          // "auto" (CUDA > MPS > CPU), "cpu", "cuda", "mps"
-  "checkpoint": null,        // path to weights; null = download and cache
-  "output": null,            // where to write results; null = stdout
+  "checkpoint": null,        // path to weights; null = download automatically
+  "output": null,            // JSON results file; null = stdout
 
-  // predict / design only: how many residues to report per position.
+  // How many residues to report per position.
   "top_k": 5,
-
-  // embed only: which representations to write, and whether to mean-pool
-  // the per-residue ones down to a single vector each.
-  "embeddings": ["cls"],     // any of: cls, antibody_blind,
-                             // antibody_conditioned, antigen_blind,
-                             // antigen_conditioned
-  "pool": true,
-
-  // attention only: which slice of the joint attention matrix to extract.
-  "attention": {
-    "kind": "ab_to_ag",      // self_ab, self_ag, ab_to_ag, ag_to_ab,
-                             // cls_to_ab, cls_to_ag
-    "layer": null,           // integer layer index, or null for all layers
-    "head": null,            // integer head index, or null for all heads
-    "average": true,         // average over whatever was left null
-    "top_n": 10              // how many top-attended positions to report
-  },
 
   // The pairs to run. One entry per antibody-antigen pair. The pair below
   // is a real one, so this file runs as-is:
   //     langaai schema > run.json && langaai design --config run.json
   "pairs": [
     {
-      // Optional label; used in the output and as the .npz key.
-      // Defaults to pair_0, pair_1, ...
+      // Optional label, echoed into the output so you can match results to
+      // inputs. Must be unique. Defaults to pair_0, pair_1, ...
       "id": "example",
 
       // Variable domains only -- not the constant region.
@@ -87,8 +66,7 @@ EXAMPLE_CONFIG = """\
       "antigen": "CPFGEVFNATRFASVYAWNRKRISNCVADYSVLYNSASFSTFKCYGVSPTKLNDLCFTNVYADSFVIRGDEVRQIAPGQTGTIADYNYKLPDDFTGCVIAWNSNNLDSKVGGNYNYRYRLFRKSNLKPFERDISTEIYQAGSKPCNGVKGFNCYFPLQSYGFQPTYGVGYQPYRVVVLSFELL",
 
       // Half-open [start, end) index pairs, 0-based, into heavy followed by
-      // light. Required by predict and design; ignored by embed and
-      // attention. This one is the CDR-H3 loop.
+      // light. Required. This one is the CDR-H3 loop.
       "spans": [[96, 108]]
     }
   ]
@@ -130,9 +108,6 @@ class Config:
     checkpoint: Optional[str] = None
     output: Optional[str] = None
     top_k: int = 5
-    embeddings: Tuple[str, ...] = ("cls",)
-    pool: bool = True
-    attention: Dict[str, Any] = field(default_factory=dict)
 
 
 def _strip_comments(text: str) -> str:
@@ -254,58 +229,30 @@ def load_config(path: Path) -> Config:
             "for an example."
         )
 
-    embeddings = raw.get("embeddings", ["cls"])
-    if isinstance(embeddings, str):
-        embeddings = [embeddings]
-    unknown = [k for k in embeddings if k not in EMBEDDING_KINDS]
-    if unknown:
-        raise ConfigError(
-            f"{path}: unknown embedding kind(s) {unknown}. "
-            f"Expected any of {list(EMBEDDING_KINDS)}."
-        )
-
     top_k = raw.get("top_k", 5)
     if not isinstance(top_k, int) or top_k < 1:
         raise ConfigError(f"{path}: 'top_k' must be a positive integer, got {top_k!r}")
 
+    pairs = tuple(_parse_pair(p, i) for i, p in enumerate(pairs_raw))
+
+    # Ids label the results, so a repeat makes the output ambiguous.
+    seen: Dict[str, int] = {}
+    for position, pair in enumerate(pairs):
+        if pair.id in seen:
+            raise ConfigError(
+                f"{path}: duplicate pair id {pair.id!r} (pairs[{seen[pair.id]}] "
+                f"and pairs[{position}]). Ids must be unique -- they are what "
+                "matches a result back to its input."
+            )
+        seen[pair.id] = position
+
     return Config(
-        pairs=tuple(_parse_pair(p, i) for i, p in enumerate(pairs_raw)),
+        pairs=pairs,
         device=raw.get("device", "auto"),
         checkpoint=raw.get("checkpoint"),
         output=raw.get("output"),
         top_k=top_k,
-        embeddings=tuple(embeddings),
-        pool=bool(raw.get("pool", True)),
-        attention=dict(raw.get("attention") or {}),
     )
-
-
-def _require_spans(cfg: Config, task: str) -> None:
-    missing = [p.id for p in cfg.pairs if not p.spans]
-    if missing:
-        raise ConfigError(
-            f"'{task}' needs a 'spans' entry for every pair; missing on: "
-            f"{', '.join(missing)}. This package does not compute CDR "
-            "boundaries -- supply them from your own numbering step."
-        )
-
-
-def _check_attention(cfg: Config, task: str) -> None:
-    from .attention import ATTENTION_BLOCK_KINDS
-
-    settings = cfg.attention
-    kind = settings.get("kind", "ab_to_ag")
-    if kind not in ATTENTION_BLOCK_KINDS:
-        raise ConfigError(
-            f"attention.kind {kind!r} is not one of {list(ATTENTION_BLOCK_KINDS)}"
-        )
-    if settings.get("layer") is None and settings.get("head") is not None \
-            and not settings.get("average", True):
-        raise ConfigError(
-            "attention: selecting a head across all layers with average=false "
-            "returns one matrix per layer. Set attention.layer, or leave "
-            "attention.average true."
-        )
 
 
 def preflight(cfg: Config, task: str) -> None:
@@ -314,10 +261,13 @@ def preflight(cfg: Config, task: str) -> None:
     Loading the model takes seconds and downloads weights on a cold cache,
     so anything knowable from the settings file alone is rejected first.
     """
-    if task in ("predict", "design"):
-        _require_spans(cfg, task)
-    elif task == "attention":
-        _check_attention(cfg, task)
+    missing = [p.id for p in cfg.pairs if not p.spans]
+    if missing:
+        raise ConfigError(
+            f"'{task}' needs a 'spans' entry for every pair; missing on: "
+            f"{', '.join(missing)}. This package does not compute CDR "
+            "boundaries -- supply them from your own numbering step."
+        )
 
 
 # --------------------------------------------------------------------------
@@ -415,126 +365,9 @@ def cmd_design(model, cfg: Config) -> Dict[str, Any]:
     return {"task": "design", "results": results}
 
 
-def cmd_embed(model, cfg: Config) -> Dict[str, Any]:
-    """Write the requested representations to a .npz, with a JSON manifest."""
-    import numpy as np
-
-    import langaai
-
-    arrays: Dict[str, Any] = {}
-    manifest = []
-    for pair in cfg.pairs:
-        ab, ag = _build(model, pair)
-        tensors: Dict[str, Any] = {}
-        if "cls" in cfg.embeddings:
-            [tensors["cls"]] = model.cls_embedding([(ab, ag)])
-        if "antibody_blind" in cfg.embeddings:
-            [tensors["antibody_blind"]] = model.antibody_embedding_blind([ab])
-        if "antibody_conditioned" in cfg.embeddings:
-            [tensors["antibody_conditioned"]] = model.antibody_embedding_conditioned([(ab, ag)])
-        if "antigen_blind" in cfg.embeddings:
-            [tensors["antigen_blind"]] = model.antigen_embedding_blind([ag])
-        if "antigen_conditioned" in cfg.embeddings:
-            [tensors["antigen_conditioned"]] = model.antigen_embedding_conditioned([(ab, ag)])
-
-        shapes = {}
-        for kind, tensor in tensors.items():
-            # 'cls' is already one vector per pair; pooling it is a no-op.
-            if cfg.pool and kind != "cls" and tensor.ndim == 2:
-                tensor = langaai.mean_pool(tensor)
-            array = tensor.numpy()
-            arrays[f"{pair.id}/{kind}"] = array
-            shapes[kind] = list(array.shape)
-
-        manifest.append({
-            "id": pair.id,
-            "antigen_truncated": bool(ag.truncated),
-            "n_antibody_residues": len(ab),
-            "n_antigen_residues": len(ag),
-            "shapes": shapes,
-        })
-
-    out = Path(cfg.output or "langaai_embeddings.npz")
-    if out.suffix != ".npz":
-        out = out.with_suffix(".npz")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(out, **arrays)
-    print(f"wrote {out}", file=sys.stderr)
-
-    return {
-        "task": "embed",
-        "archive": str(out),
-        "pooled": cfg.pool,
-        "embeddings": list(cfg.embeddings),
-        "keys": sorted(arrays),
-        "results": manifest,
-    }
-
-
-def cmd_attention(model, cfg: Config) -> Dict[str, Any]:
-    """Extract a segment slice of the joint attention matrix."""
-    import numpy as np
-
-    settings = cfg.attention
-    kind = settings.get("kind", "ab_to_ag")
-    layer = settings.get("layer")
-    head = settings.get("head")
-    average = bool(settings.get("average", True))
-    top_n = int(settings.get("top_n", 10))
-
-    arrays: Dict[str, Any] = {}
-    results = []
-    for pair in cfg.pairs:
-        ab, ag = _build(model, pair)
-        [block] = model.attention_block(
-            [(ab, ag)], kind, layer=layer, head=head, average=average
-        )
-        if not hasattr(block, "ndim"):
-            raise ConfigError(
-                "attention returned one matrix per layer. Set attention.layer "
-                "to an integer, or attention.average to true, to get a single "
-                "matrix per pair."
-            )
-        array = block.numpy()
-        arrays[pair.id] = array
-
-        # Which columns (the attended-to side) draw the most attention,
-        # summed over the attending side's positions.
-        column_mass = array.sum(axis=0) if array.ndim == 2 else array.sum()
-        top = (
-            np.argsort(column_mass)[::-1][:top_n].tolist()
-            if array.ndim == 2 else []
-        )
-        results.append({
-            "id": pair.id,
-            "kind": kind,
-            "shape": list(array.shape),
-            "top_attended_positions": [int(i) for i in top],
-        })
-
-    out = Path(cfg.output or "langaai_attention.npz")
-    if out.suffix != ".npz":
-        out = out.with_suffix(".npz")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(out, **arrays)
-    print(f"wrote {out}", file=sys.stderr)
-
-    return {
-        "task": "attention",
-        "archive": str(out),
-        "kind": kind,
-        "layer": layer,
-        "head": head,
-        "average": average,
-        "results": results,
-    }
-
-
 _TASKS = {
     "predict": cmd_predict,
     "design": cmd_design,
-    "embed": cmd_embed,
-    "attention": cmd_attention,
 }
 
 
@@ -557,8 +390,6 @@ def _build_parser() -> argparse.ArgumentParser:
     descriptions = {
         "predict": "Top-k residues at each position of the given spans.",
         "design": "Mask whole spans and read off one designed sequence.",
-        "embed": "Write pair representations to a .npz archive.",
-        "attention": "Extract a slice of the joint attention matrix.",
     }
     for name, help_text in descriptions.items():
         task = sub.add_parser(name, help=help_text, description=help_text)
@@ -569,8 +400,7 @@ def _build_parser() -> argparse.ArgumentParser:
         task.add_argument("--output", help="Override the config's 'output'")
         task.add_argument("--device", help="Override the config's 'device'")
         task.add_argument("--checkpoint", help="Override the config's 'checkpoint'")
-        if name in ("predict", "design"):
-            task.add_argument("--top-k", type=int, help="Override the config's 'top_k'")
+        task.add_argument("--top-k", type=int, help="Override the config's 'top_k'")
 
     sub.add_parser(
         "schema",
@@ -631,7 +461,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"langaai {args.task}: {exc}", file=sys.stderr)
         return 2
 
-    overrides = {}
+    overrides: Dict[str, Any] = {}
     for key in ("output", "device", "checkpoint"):
         if getattr(args, key, None) is not None:
             overrides[key] = getattr(args, key)
@@ -654,14 +484,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"langaai {args.task}: {exc}", file=sys.stderr)
         return 1
 
-    try:
-        payload = _TASKS[args.task](model, cfg)
-    except ConfigError as exc:
-        print(f"langaai {args.task}: {exc}", file=sys.stderr)
-        return 2
-
-    # embed/attention have already written their arrays; this is the manifest.
-    _emit(payload, cfg.output if args.task in ("predict", "design") else None)
+    payload = _TASKS[args.task](model, cfg)
+    _emit(payload, cfg.output)
     return 0
 
 

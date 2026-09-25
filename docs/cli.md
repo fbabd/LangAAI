@@ -1,6 +1,6 @@
 # Command-line interface
 
-Every task reads one JSON settings file:
+`predict` and `design` each read one JSON settings file:
 
 ```bash
 langaai <task> --config run.json
@@ -20,6 +20,12 @@ JSON has none.
 
 If you installed the package but `langaai` is not found, use
 `python -m langaai.cli` instead; it is the same entry point.
+
+Embeddings and attention are not CLI tasks: both return arrays rather than a
+table of residues, and what you do with them is a Python question. Use
+`model.cls_embedding(...)` and `model.attention_block(...)` directly — see
+[examples/embed_pair.ipynb](../examples/embed_pair.ipynb) and
+[examples/attention_map.ipynb](../examples/attention_map.ipynb).
 
 ## `langaai download`
 
@@ -48,16 +54,14 @@ into place atomically, so an interrupted run leaves nothing behind.
   "checkpoint": null,
   "output": null,
   "top_k": 5,
-  "embeddings": ["cls"],
-  "pool": true,
-  "attention": { "kind": "ab_to_ag", "layer": null, "head": null,
-                 "average": true, "top_n": 10 },
   "pairs": [
     { "id": "example", "heavy": "...", "light": "...", "antigen": "...",
       "spans": [[96, 108]] }
   ]
 }
 ```
+
+A ready-to-run copy is in [examples/run.json](../examples/run.json).
 
 `pairs` is the only required key.
 
@@ -67,7 +71,8 @@ into place atomically, so an interrupted run leaves nothing behind.
 |---|---|---|
 | `device` | `"auto"` | `"auto"` picks CUDA, then Apple MPS, then CPU. Or name one: `"cpu"`, `"cuda"`, `"cuda:1"`, `"mps"`. |
 | `checkpoint` | `null` | Path to the weights. `null` searches `LANGAAI_CHECKPOINT`, then `LANGAAI_CHECKPOINT_DIR`, then the package's own `checkpoints/`, then downloads them (see `langaai download`). |
-| `output` | `null` | Where results go. For `predict`/`design` this is a JSON file, and `null` means stdout. For `embed`/`attention` it is a `.npz` archive, defaulting to `langaai_embeddings.npz` / `langaai_attention.npz`. |
+| `top_k` | `5` | How many residues to report per position. `design` uses the top one; the rest are context. |
+| `output` | `null` | JSON results file. `null` prints to stdout, so you can pipe into `jq`. |
 
 ### Per-pair keys
 
@@ -76,8 +81,8 @@ into place atomically, so an interrupted run leaves nothing behind.
 | `heavy` | yes | Heavy-chain **variable domain** — not the full chain with its constant region. |
 | `light` | no | Light-chain variable domain. Omit for a heavy-only antibody. |
 | `antigen` | yes | Antigen sequence. |
-| `spans` | for `predict`, `design` | Half-open `[start, end)` index pairs, 0-based, into heavy followed by light. |
-| `id` | no | Label used in the output and as the `.npz` key. Defaults to `pair_0`, `pair_1`, … |
+| `spans` | yes | Half-open `[start, end)` index pairs, 0-based, into heavy followed by light. |
+| `id` | no | Your own label for the pair, echoed into the output so you can match a result back to its input. The model never sees it. Must be unique. Defaults to `pair_0`, `pair_1`, … |
 
 Sequences may be lower-case (they are upper-cased) but must contain only the
 20 amino acids plus `X`. Anything else is rejected by name.
@@ -177,107 +182,6 @@ positions condition on each other — see
 
 `spans` are not required to hold a native loop; whatever is there is
 reported as `native` and used as the recovery baseline.
-
----
-
-## `langaai embed`
-
-Writes representations to a `.npz` archive, keyed `"<pair id>/<kind>"`, and
-prints a JSON manifest to stdout.
-
-```bash
-langaai embed --config run.json --output vectors.npz
-```
-
-```json
-{
-  "task": "embed",
-  "archive": "vectors.npz",
-  "pooled": true,
-  "embeddings": ["cls", "antibody_conditioned"],
-  "keys": ["example/antibody_conditioned", "example/cls"],
-  "results": [
-    {
-      "id": "example",
-      "antigen_truncated": false,
-      "n_antibody_residues": 232,
-      "n_antigen_residues": 183,
-      "shapes": { "cls": [480], "antibody_conditioned": [480] }
-    }
-  ]
-}
-```
-
-| Kind | Shape (unpooled) | What it is |
-|---|---|---|
-| `cls` | `[dim]` | The native pair-level pooled vector. Start here for a downstream predictor. |
-| `antibody_blind` | `[n_ab, dim]` | Frozen ESM-2 over the antibody alone; never sees the antigen. |
-| `antibody_conditioned` | `[n_ab, dim]` | Antibody after the joint stack — antigen-aware. |
-| `antigen_blind` | `[n_ag, dim]` | The raw antigen embedding fed into the model. |
-| `antigen_conditioned` | `[n_ag, dim]` | Antigen after the joint stack — "paratope-aware". |
-
-`"pool": true` (the default) mean-pools the per-residue kinds down to one
-`[dim]` vector each. `cls` is already one vector, so pooling leaves it
-alone. Set `"pool": false` to keep per-residue rows.
-
-Reading it back:
-
-```python
-import numpy as np
-archive = np.load("vectors.npz")
-vector = archive["example/cls"]          # [480]
-```
-
-The manifest reports `antigen_truncated` per pair — check it if any antigen
-might exceed `max_len`.
-
----
-
-## `langaai attention`
-
-Extracts one segment slice of the joint attention matrix to a `.npz`, keyed
-by pair id, and prints a JSON summary.
-
-```bash
-langaai attention --config run.json --output attention.npz
-```
-
-| `attention` key | Default | Meaning |
-|---|---|---|
-| `kind` | `"ab_to_ag"` | Which slice — see the table below. |
-| `layer` | `null` | Layer index, or `null` for all layers. |
-| `head` | `null` | Head index, or `null` for all heads. |
-| `average` | `true` | Average over whichever of `layer`/`head` was left `null`. |
-| `top_n` | `10` | How many top-attended positions to report. |
-
-| `kind` | Rows → columns |
-|---|---|
-| `ab_to_ag` | antibody → antigen (paratope → epitope) |
-| `ag_to_ab` | antigen → antibody (epitope → paratope) |
-| `self_ab` | antibody → antibody |
-| `self_ag` | antigen → antigen |
-| `cls_to_ab` | pooled token → antibody |
-| `cls_to_ag` | pooled token → antigen |
-
-```json
-{
-  "task": "attention",
-  "kind": "ab_to_ag",
-  "results": [
-    { "id": "example", "shape": [232, 183],
-      "top_attended_positions": [122, 100, 178, 179, 98] }
-  ]
-}
-```
-
-`top_attended_positions` indexes the **column** side — for `ab_to_ag`, the
-antigen positions drawing the most attention, summed over antibody
-positions. Attention mass is not a contact prediction; see
-[MODEL_CARD.md](../MODEL_CARD.md).
-
-The task needs a single matrix per pair, so either set `layer` to an integer
-or leave `average` as `true`. Asking for all layers unaveraged is rejected
-up front.
 
 ---
 

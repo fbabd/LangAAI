@@ -21,8 +21,9 @@ pairs -- pass a single-item list for one pair. There's no separate
 "batch" variant: see ``_batching.py``'s module docstring for why each pair
 gets its own forward pass internally rather than a padded tensor batch.
 
-See MODEL_CARD.md for what the model was trained and evaluated on, and in
-particular for what ``score_sequence`` is and is not validated for.
+``score_sequence`` is a masked-reconstruction likelihood, not a validated
+binding-affinity predictor; see ``predict.py`` for what that does and does
+not mean.
 """
 
 from __future__ import annotations

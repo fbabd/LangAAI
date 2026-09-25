@@ -20,10 +20,7 @@ It is sequence-only — it never sees a structure.
 ## Install
 
 The weights are **not** in this repository — they are ~195 MB. They are
-downloaded automatically the first time you load the model, verified against
-a checksum, and saved inside the installed package at
-`langaai/checkpoints/langaai.pt`. Every later run reads that file directly,
-offline. You do not have to do anything.
+downloaded automatically the first time you load the model. Every later run reads that file directly, offline. You do not have to do anything.
 
 ### Option 1 — install the package (recommended)
 
@@ -71,18 +68,6 @@ The download is streamed to a temporary file, checked against a SHA-256, and
 only then moved into place, so an interrupted download can never leave a
 half-written checkpoint behind.
 
-**Pointing at weights you already have**, in order of precedence:
-
-| How | Use it for |
-|---|---|
-| `langaai.load(checkpoint_path="...")` | One call |
-| `LANGAAI_CHECKPOINT=/path/to/langaai.pt` | A whole session |
-| `LANGAAI_CHECKPOINT_DIR=/shared/models` | A directory to search and download into — shared or scratch storage |
-| `LANGAAI_CHECKPOINT_URL=https://...` | Serving the weights from somewhere else |
-
-If the installed package is read-only, downloads fall back to
-`~/.cache/langaai/`. In a source clone, `checkpoints/langaai.pt` beside the
-package is also found automatically.
 
 > **Requires `transformers>=5.0`.** The checkpoint stores ESM-2's rotary
 > embeddings in the layout `transformers` 5.0 introduced. On 4.x, loading
@@ -124,15 +109,26 @@ langaai schema > run.json     # an annotated, immediately runnable example
 langaai design --config run.json
 ```
 
+A ready-to-run settings file is also checked in at
+[examples/run.json](examples/run.json):
+
+```bash
+langaai design  --config examples/run.json
+langaai predict --config examples/run.json --top-k 3
+```
+
 ```
 langaai predict    Top-k residues at each masked position
 langaai design     Mask whole spans, read off one designed sequence
-langaai embed      Write pair representations to a .npz archive
-langaai attention  Extract a slice of the joint attention matrix
 langaai schema     Print an annotated example settings file
+langaai download   Fetch the weights ahead of time
 ```
 
-**[docs/cli.md](docs/cli.md)** documents every settings key and every task's
+Embeddings and attention are Python-only — they return arrays rather than a
+table of residues, so what you do with them is a Python question. See
+[examples/](examples/).
+
+**[docs/cli.md](docs/cli.md)** documents every settings key and both tasks'
 output format.
 
 ## CDR spans
@@ -153,7 +149,7 @@ or whatever annotation your data already carries.
 | `ab.mask_positions(indices)` / `ab.mask_region(name, spans)` | Mask positions |
 | `model.predict_masked(pairs, top_k=5)` | Top-k residues per masked position |
 | `model.residue_probabilities(pairs)` | Full distribution per masked position |
-| `model.score_sequence(pairs, positions=None)` | Masked-reconstruction log-likelihood — **not an affinity predictor**, see [MODEL_CARD.md](MODEL_CARD.md) |
+| `model.score_sequence(pairs, positions=None)` | Masked-reconstruction log-likelihood — **not an affinity predictor** |
 | `model.antibody_embedding_blind/_conditioned(...)` | Antibody embedding, without / with antigen context |
 | `model.antigen_embedding_blind/_conditioned(...)` | Antigen embedding, without / with antibody context |
 | `model.cls_embedding(pairs)` | Pair-level pooled vector |
@@ -171,9 +167,3 @@ each one covers.
 
 **TODO: add the paper citation and BibTeX entry once it is public.**
 
-## What isn't here
-
-No training code, no alternative model sizes, no CDR-numbering tool, and no
-structural modelling. `score_sequence` is a reconstruction likelihood, not a
-binding-affinity predictor. [MODEL_CARD.md](MODEL_CARD.md)'s "Known
-limitations" spells out what each of those means in practice.
