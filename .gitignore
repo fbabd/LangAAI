@@ -1,0 +1,24 @@
+# Model weights are downloaded on first use, never committed: the checkpoint
+# is ~195 MB, over GitHub's 100 MB per-file limit. `langaai.load()` fetches
+# it into langaai/checkpoints/; a source clone may also keep one here.
+checkpoints/
+langaai/checkpoints/
+*.pt
+*.ckpt
+*.safetensors
+
+# Outputs of the CLI and the notebooks
+*.npz
+langaai_embeddings.npz
+langaai_attention.npz
+
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+*.DS_Store
