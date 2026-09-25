@@ -165,5 +165,5 @@ each one covers.
 
 ## Citation
 
-**TODO: add the paper citation and BibTeX entry once it is public.**
+
 
