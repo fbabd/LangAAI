@@ -12,8 +12,7 @@ Contents:
         API symmetry with the other three).
     antigen_embedding_conditioned: Post-joint-stack ``ag`` -- "paratope-aware".
     cls_embedding: The one native pair-level pooled vector (``out["cls"]``).
-        This is the representation to build a downstream predictor on -- see
-        MODEL_CARD.md for what has and hasn't been validated on top of it.
+        This is the representation to build a downstream predictor on.
     mean_pool: ``[L, dim] -> [dim]`` mean over all positions -- every tensor
         this module returns is already exactly the item's own length (see
         ``_batching._forward``'s docstring), so no pad mask is needed here.

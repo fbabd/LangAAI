@@ -32,15 +32,19 @@ two rankings genuinely disagree.
 
 ## The same things from the command line
 
-Every notebook except `candidate_cdr3_search.ipynb` has a CLI equivalent
-that takes a JSON settings file — see [../docs/cli.md](../docs/cli.md).
+Two of these have a CLI equivalent driven by a JSON settings file —
+[run.json](run.json) is ready to run, and
+[../docs/cli.md](../docs/cli.md) documents every key.
 
 | Notebook | Command |
 |---|---|
 | `predict_cdr3.ipynb` | `langaai predict --config run.json` |
 | `design_cdr3.ipynb` | `langaai design --config run.json` |
-| `embed_pair.ipynb` | `langaai embed --config run.json` |
-| `attention_map.ipynb` | `langaai attention --config run.json` |
+
+Embeddings and attention are Python-only. They return arrays rather than a
+table of residues, so what you do with them — a regressor, a heatmap, a
+retrieval index — is a Python question; a settings file would only get in
+the way. `embed_pair.ipynb` and `attention_map.ipynb` show the calls.
 
 ## Spans
 

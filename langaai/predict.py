@@ -16,10 +16,9 @@ evaluation behind this model established that connection, so a higher score
 means "more consistent with the model's learned CDR-given-antigen
 distribution", not "binds better".
 
-If you want affinity, fit your own regressor on ``cls_embedding``. That is
-the route the model card reports cross-validated affinity numbers for; it is
-a fitted, supervised model against real affinity labels, which
-``score_sequence`` is not. See MODEL_CARD.md.
+If you want affinity, fit your own regressor on ``cls_embedding`` against
+real affinity labels. A fitted, supervised model is a different thing from a
+reconstruction likelihood, which is all ``score_sequence`` reports.
 """
 
 from __future__ import annotations
