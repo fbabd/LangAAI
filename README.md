@@ -1,6 +1,6 @@
 # LangAAI
 
-An **antigen-conditioned masked language model for antibody CDR sequences**.
+An **antigen-conditioned masked language model for antibody CDR sequences**. 
 
 Most antibody language models read the antibody alone. LangAAI reads the
 antibody *and* its target antigen in one joint attention stack, so the
